@@ -295,7 +295,297 @@ dpo_trainer.train()
 
 ---
 
-## 10. Best Practices & Pitfalls
+Perfect 👍 I’ll prepare a **complete detailed notes-style write-up** here in chat.
+It will include:
+
+* Clear **explanations** of each method (why, how it works).
+* **Algorithms / pseudocode** for understanding.
+* **Runnable Python code** (Hugging Face/PEFT style) you can test directly.
+* **When to use each method**.
+
+---
+## 10. 🔑 Introduction to Fine-Tuning
+
+Fine-tuning is the process of taking a **pretrained LLM** (trained on huge general-purpose text) and adapting it to a **specific domain or task** with smaller labeled datasets.
+
+### Why fine-tuning?
+
+* Reduce cost: Don’t train from scratch (saves GPUs + time).
+* Task alignment: Domain-specific QA, chatbots, medical/legal summarization.
+* Better performance: Reduce hallucination & increase accuracy.
+
+---
+
+## 11. 🔄 Types of Fine-Tuning
+
+1. **Full Fine-Tuning** – Update all model weights. Costly & heavy.
+2. **Parameter-Efficient Fine-Tuning (PEFT)** – Update only small parts of the model. Examples: LoRA, Prefix Tuning, P-Tuning v2, AdaLoRA, IA³, DoRA.
+3. **Alignment Fine-Tuning** – Post-training alignment with human feedback. Examples: DPO, RLHF.
+4. **Continual Fine-Tuning** – Keep training on new data without catastrophic forgetting.
+
+---
+
+## 12. 🟢 Full Fine-Tuning (Baseline)
+
+### Algorithm
+
+1. Load pretrained LLM.
+2. Replace task head if needed (classification, generation).
+3. Fine-tune all parameters on dataset.
+
+### Pseudocode
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+from datasets import load_dataset
+
+# Load model & tokenizer
+model_name = "gpt2"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name)
+
+# Load dataset
+dataset = load_dataset("imdb")
+
+# Tokenize
+def tokenize(batch):
+    return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=128)
+tokenized_dataset = dataset.map(tokenize, batched=True)
+
+# Training arguments
+args = TrainingArguments(
+    output_dir="./ft-gpt2",
+    per_device_train_batch_size=4,
+    num_train_epochs=3,
+    learning_rate=5e-5,
+    logging_steps=100,
+    save_steps=500,
+    evaluation_strategy="steps"
+)
+
+trainer = Trainer(
+    model=model,
+    args=args,
+    train_dataset=tokenized_dataset["train"],
+    eval_dataset=tokenized_dataset["test"]
+)
+
+trainer.train()
+```
+
+✅ Works, but expensive for big models (billions of parameters).
+
+---
+
+## 13. 🟢 LoRA / QLoRA (Most Used in Industry)
+
+**LoRA (Low-Rank Adaptation):**
+
+* Insert trainable low-rank matrices into attention layers.
+* Freeze original weights, only train LoRA weights.
+* QLoRA = LoRA + 4-bit quantization (runs on 1 GPU).
+
+### Pseudocode
+
+```
+for each transformer layer:
+    freeze Wq, Wv
+    add low-rank matrices A, B
+    train only A and B
+```
+
+### Runnable Example
+
+```python
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_name = "decapoda-research/llama-7b-hf"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, load_in_8bit=True, device_map="auto")
+
+# Apply LoRA
+config = LoraConfig(
+    r=8,
+    lora_alpha=32,
+    lora_dropout=0.1,
+    target_modules=["q_proj", "v_proj"]
+)
+model = get_peft_model(model, config)
+```
+
+---
+
+## 14. 🟢 Prefix Tuning
+
+**Idea:** Instead of changing weights, prepend trainable "prefix tokens" to every input.
+
+### Pseudocode
+
+```
+input = [prefix_tokens] + [actual_tokens]
+only train prefix_tokens embeddings
+```
+
+### Code
+
+```python
+from peft import PrefixTuningConfig
+
+prefix_config = PrefixTuningConfig(
+    task_type="CAUSAL_LM",
+    num_virtual_tokens=30
+)
+model = get_peft_model(model, prefix_config)
+```
+
+---
+
+## 15. 🟢 P-Tuning v2
+
+**Improves Prefix Tuning**: Instead of static prefix, learns deep continuous prompts at every transformer layer.
+
+### Pseudocode
+
+```
+for each layer:
+    insert learnable prompt embeddings
+train only prompt embeddings
+```
+
+### Code
+
+```python
+from peft import PromptTuningConfig
+
+prompt_config = PromptTuningConfig(
+    task_type="CAUSAL_LM",
+    prompt_tuning_init="TEXT",
+    num_virtual_tokens=50,
+    tokenizer_name_or_path=model_name
+)
+model = get_peft_model(model, prompt_config)
+```
+
+---
+
+## 16. 🟢 IA³ (Input-Output-Attention Adapters)
+
+* Insert scaling vectors into input, output, and attention weights.
+* Fewer parameters than LoRA.
+
+### Pseudocode
+
+```
+for each transformer layer:
+    scale input, output, attention by learnable vectors
+```
+
+(Not fully available in Hugging Face yet — mostly in research repos.)
+
+---
+
+## 17. 🟢 AdaLoRA (Adaptive LoRA)
+
+* Dynamic rank adjustment (reduces memory further).
+* Keeps important directions, drops unimportant ones.
+
+### Pseudocode
+
+```
+init LoRA with high rank
+monitor importance of directions
+prune less useful directions during training
+```
+
+---
+
+## 18. 🟢 DoRA (Decomposed Rank-One Adaptation, 2024)
+
+* Factorizes LoRA updates into *magnitude × direction*.
+* Improves stability vs LoRA.
+
+### Pseudocode
+
+```
+deltaW = scale_vector * direction_vector
+```
+
+---
+
+## 19. 🟢 DPO (Direct Preference Optimization)
+
+Used for alignment with human preferences.
+
+### Idea
+
+* Collect preference pairs (A preferred over B).
+* Train model to maximize log-probability of preferred answers.
+
+### Code (Hugging Face TRL)
+
+```python
+from trl import DPOTrainer
+
+trainer = DPOTrainer(
+    model,
+    ref_model,
+    beta=0.1,
+    train_dataset=preference_dataset,
+    tokenizer=tokenizer
+)
+trainer.train()
+```
+
+---
+
+## 20. 🟢 Continual Fine-Tuning
+
+* Keep adapting model with new data (avoid catastrophic forgetting).
+* Use **regularization** (EWC, L2 penalty) or **replay buffer** of old samples.
+
+---
+
+## 21. ✅ Cheat Sheet: When to Use What
+
+| Method            | Use Case                      | Pros                 | Cons                    |
+| ----------------- | ----------------------------- | -------------------- | ----------------------- |
+| Full FT           | Small model, lots of compute  | Max accuracy         | Very costly             |
+| LoRA/QLoRA        | Default choice for big models | Efficient, supported | Slightly lower accuracy |
+| Prefix/PTuning v2 | Few-shot tasks                | Lightweight          | Less expressive         |
+| IA³               | Extreme parameter efficiency  | Super light          | Less adoption           |
+| AdaLoRA           | Dynamic efficiency            | Smarter than LoRA    | More complex            |
+| DoRA              | Stable LoRA upgrade           | State-of-art         | Early adoption          |
+| DPO/RLHF          | Human alignment               | Aligns model tone    | Needs preference data   |
+| Continual FT      | Evolving domains              | Keeps model updated  | Risk of forgetting      |
+
+---
+
+## 22. 📌 References
+
+* Hugging Face PEFT Docs → [https://huggingface.co/docs/peft](https://huggingface.co/docs/peft)
+* Hugging Face TRL (RLHF/DPO) → [https://huggingface.co/docs/trl](https://huggingface.co/docs/trl)
+* LoRA Paper → [https://arxiv.org/abs/2106.09685](https://arxiv.org/abs/2106.09685)
+* QLoRA Paper → [https://arxiv.org/abs/2305.14314](https://arxiv.org/abs/2305.14314)
+* DoRA (2024) → [https://arxiv.org/abs/2402.09353](https://arxiv.org/abs/2402.09353)
+
+---
+
+✅ With this single document, you now have:
+
+* **Theory**
+* **Algorithms**
+* **Pseudocode**
+* **Runnable Hugging Face code**
+
+So you can **fine-tune any model in your company project** 🚀
+
+---
+
+Do you want me to now prepare a **ready-to-run Colab notebook** that contains **all these methods implemented step by step** so you can directly test fine-tuning on a small model (like GPT-2 or LLaMA-7B QLoRA)?
+
+
+## 23. Best Practices & Pitfalls
 
 **Best Practices:**
 
@@ -313,7 +603,7 @@ dpo_trainer.train()
 
 ---
 
-## 11. Key Takeaways
+## 24. Key Takeaways
 
 * Fine-tuning adapts large pre-trained models to specialized tasks.
 * Full fine-tuning is expensive → PEFT (LoRA, Prefix, P-Tuning, etc.) is the industry standard.
